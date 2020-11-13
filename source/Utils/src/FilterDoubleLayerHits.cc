@@ -1,5 +1,6 @@
 #include "FilterDoubleLayerHits.h"
 #include <iostream>
+#include <numeric>
 #include <cstdlib>
 #include <string.h>
 
@@ -52,6 +53,12 @@ FilterDoubleLayerHits::FilterDoubleLayerHits() : Processor("FilterDoubleLayerHit
                              _fillHistos ,
                              false );
 
+
+  registerProcessorParameter( "LayerMargins" ,
+                             "Margins from the sensor edges within which hits should be always kept: <layer> <dU> <dV>" ,
+                             _layerMarginConfigs ,
+                             StringVec(0) );
+
   StringVec dlCutConfigsEx ;
   dlCutConfigsEx.push_back("0") ;
   dlCutConfigsEx.push_back("1") ;
@@ -92,6 +99,37 @@ dd4hep::rec::Vector2D FilterDoubleLayerHits::globalToLocal(long int cellID, cons
 }
 
 
+bool FilterDoubleLayerHits::hitIsAtEdge(TrackerHitPlane* h, dd4hep::rec::ISurface* surf, UTIL::CellIDDecoder<TrackerHitPlane>& decoder) {
+  if (!surf) return false;
+  if (_sensorMargins.size() == 0) return false;
+  unsigned int layerID = decoder(h)["layer"];
+  // Finding margin definitions for the layer
+  const auto marginConfig = _sensorMargins.find(layerID);
+  if (marginConfig == _sensorMargins.end()) return false;
+
+  double marginU = marginConfig->second.first;
+  double marginV = marginConfig->second.second;
+
+  // Getting the local hit position on the sensor surface
+  dd4hep::rec::Vector3D posGlobal( h->getPosition()[0], h->getPosition()[1], h->getPosition()[2] );
+  dd4hep::rec::Vector2D posLocal = globalToLocal( decoder( h ).getValue(), posGlobal, &surf );
+  // Checking whether shifting the hit by margin in each direction would move it outside the sensor surface
+  for ( int dirU : std::vector<int>({-1, 1}) ) {
+    for ( int dirV : std::vector<int>({-1, 1}) ) {
+      // Creating a shifted local hit position
+      dd4hep::rec::Vector2D posLocal_shifted(dd4hep::mm * (posLocal.u() + dirU * marginU),
+                                             dd4hep::mm * (posLocal.v() + dirV * marginV) );
+      // Testing whether shifted hit is still at the surface
+      dd4hep::rec::Vector3D posGlobal_shifted = surf->localToGlobal( posLocal_shifted );
+
+      if ( surf->insideBounds(posGlobal_shifted) ) continue;
+      return true;
+    }
+  }
+  return false;
+}
+
+
 void FilterDoubleLayerHits::init() {
 
   streamlog_out(DEBUG) << "   init called  " << std::endl ;
@@ -102,11 +140,23 @@ void FilterDoubleLayerHits::init() {
 
   unsigned i=0,index=0 ;
   while( i < _dlCutConfigs.size() ){
-    _dlCuts[index].layer0      = std::atoi( _dlCutConfigs[ i++ ].c_str() ) ;
-    _dlCuts[index].layer1      = std::atoi( _dlCutConfigs[ i++ ].c_str() ) ;
-    _dlCuts[index].dU_max      = std::atof( _dlCutConfigs[ i++ ].c_str() ) ;
-    _dlCuts[index].dTheta_max  = std::atof( _dlCutConfigs[ i++ ].c_str() ) / 1e3 ;  // converting mrad -> rad
+    _dlCuts.at(index).layer0      = std::atoi( _dlCutConfigs[ i++ ].c_str() ) ;
+    _dlCuts.at(index).layer1      = std::atoi( _dlCutConfigs[ i++ ].c_str() ) ;
+    _dlCuts.at(index).dU_max      = std::atof( _dlCutConfigs[ i++ ].c_str() ) ;
+    _dlCuts.at(index).dTheta_max  = std::atof( _dlCutConfigs[ i++ ].c_str() ) / 1e3 ;  // converting mrad -> rad
     ++index ;
+  }
+
+  // Extracting sensor margin configurations
+  i=0;
+  while( i < _layerMarginConfigs.size() ){
+    size_t layer1 = std::atoi( _layerMarginConfigs[ i++ ].c_str() );
+    size_t layer2 = std::atoi( _layerMarginConfigs[ i++ ].c_str() );
+    double dU = std::atof( _layerMarginConfigs[ i++ ].c_str() );
+    double dV = std::atof( _layerMarginConfigs[ i++ ].c_str() );
+    for (size_t layer = layer1; layer <= layer2; ++layer) {
+      _sensorMargins[layer] = std::pair<double, double>( dU, dV );
+    }
   }
 
   // Get the surface map from the SurfaceManager
@@ -239,12 +289,13 @@ void FilterDoubleLayerHits::processEvent( LCEvent * evt ) {
       continue;
     }
 
-    // Skipping the hit from the first pass if it belongs to the outer sublayer of the cut
-    if (layerID == dlCut->layer1) continue;
-
     // Getting local and global hit positions
+    dd4hep::rec::ISurface* surf = nullptr;
     dd4hep::rec::Vector3D posGlobal( h->getPosition()[0], h->getPosition()[1], h->getPosition()[2] );
-    dd4hep::rec::Vector2D posLocal = globalToLocal( decoder( h ).getValue(), posGlobal );
+    dd4hep::rec::Vector2D posLocal = globalToLocal( decoder( h ).getValue(), posGlobal, &surf );
+
+    // Stopping the processing if the hit is on the outer layer of the cut
+    if (layerID == dlCut->layer1) continue;
 
     // Setting the values for closest hits
     double dR_min(999);
@@ -256,7 +307,7 @@ void FilterDoubleLayerHits::processEvent( LCEvent * evt ) {
     size_t nCompatibleHits(0);
     SensorPosition sensPos2 = sensPos;
     sensPos2.layer = dlCut->layer1;
-    dd4hep::rec::ISurface* surf=nullptr;
+    dd4hep::rec::ISurface* surf2 = nullptr;
     // Checking if there are any hits in the corresponding sensor at the other sublayer
     if (_hitsGrouped.find(sensPos2) == _hitsGrouped.end()) continue;
     for (size_t iHit2 : _hitsGrouped.at(sensPos2)) {
@@ -265,7 +316,7 @@ void FilterDoubleLayerHits::processEvent( LCEvent * evt ) {
 
       // Getting the local and global hit positions
       dd4hep::rec::Vector3D posGlobal2( h2->getPosition()[0], h2->getPosition()[1], h2->getPosition()[2] );
-      dd4hep::rec::Vector2D posLocal2 = globalToLocal( decoder( h2 ).getValue(), posGlobal2, &surf );
+      dd4hep::rec::Vector2D posLocal2 = globalToLocal( decoder( h2 ).getValue(), posGlobal2, &surf2 );
 
       // Checking whether hit is close enough to the 1st one
       double dU = posLocal2.u() - posLocal.u();
@@ -307,7 +358,12 @@ void FilterDoubleLayerHits::processEvent( LCEvent * evt ) {
     // Accepting the first hit if it has at least one compatible pair
     if (nCompatibleHits > 0) {
       _hitAccepted[iHit] = true;
-      streamlog_out( DEBUG5 ) << " Accepted 1st hit at layer: " << layerID << std::endl;
+      streamlog_out( DEBUG5 ) << " Accepted 1st hit at layer: " << layerID << "  with compatible hits: " << nCompatibleHits << std::endl;
+    } else
+    // Accept the first hit anyway if it is at the edge of the sensor
+    if (hitIsAtEdge(h, surf, decoder)) {
+      _hitAccepted[iHit] = true;
+      streamlog_out( DEBUG5 ) << " Accepted 1st edge hit at layer: " << layerID << ";  U: " << posLocal.u() << "  V: " << posLocal.v() << std::endl;
     }
   }
 

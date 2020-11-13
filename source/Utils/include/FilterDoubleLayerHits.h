@@ -6,6 +6,7 @@
 
 #include "DDRec/SurfaceManager.h"
 #include <EVENT/TrackerHitPlane.h>
+#include <UTIL/CellIDDecoder.h>
 
 #include "lcio.h"
 #include <string>
@@ -91,6 +92,8 @@ protected:
 
   dd4hep::rec::Vector2D globalToLocal(long int cellID, const dd4hep::rec::Vector3D& posGlobal, dd4hep::rec::ISurface** surf) ;
 
+  bool hitIsAtEdge(TrackerHitPlane* hit, dd4hep::rec::ISurface* surf, UTIL::CellIDDecoder<TrackerHitPlane>& decoder) ;
+
   ////Input collection name.
   std::string _inColName ;
 
@@ -103,10 +106,15 @@ protected:
   ////Whether to fill diagnostic histograms
   bool  _fillHistos ;
 
+  ////Margins from the sensor edges within which hits should be always kept
+  StringVec  _layerMarginConfigs ;
+
   ////Subdetector name (needed to get the sensor surface manager)
   std::string _subDetName ;
 
+  ////Configurations for cuts and sensor margins
   std::vector<DoubleLayerCut> _dlCuts ;
+  std::map<size_t, std::pair<double, double> > _sensorMargins ;
 
   ////Surface map for getting local hit positions at sensor surface
   const dd4hep::rec::SurfaceMap* _map ;
